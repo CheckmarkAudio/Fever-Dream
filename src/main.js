@@ -9,6 +9,99 @@ const statusValue = document.getElementById('status-value');
 const keys = new Set();
 const presses = new Set();
 
+const audioManager = (() => {
+  const trackUrls = {
+    low: 'assets/audio/low_energy/track.mp3',
+    high: 'assets/audio/high_energy/track.mp3',
+  };
+  const crossfadeSeconds = 1.4;
+  const state = {
+    context: null,
+    buffers: null,
+    gains: null,
+    sources: null,
+    isReady: false,
+    isPlaying: false,
+    targetState: 'low',
+  };
+
+  const createSource = (buffer) => {
+    const source = state.context.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    return source;
+  };
+
+  const initAudio = async () => {
+    if (state.isReady) return;
+    state.context = new AudioContext();
+    const [lowBuffer, highBuffer] = await Promise.all(
+      Object.values(trackUrls).map(async (url) => {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to load audio track: ${url}`);
+        }
+        const data = await response.arrayBuffer();
+        return state.context.decodeAudioData(data);
+      }),
+    );
+
+    state.buffers = { low: lowBuffer, high: highBuffer };
+    state.gains = {
+      low: state.context.createGain(),
+      high: state.context.createGain(),
+    };
+    state.sources = {
+      low: createSource(lowBuffer),
+      high: createSource(highBuffer),
+    };
+
+    state.gains.low.gain.value = 1;
+    state.gains.high.gain.value = 0;
+
+    state.sources.low.connect(state.gains.low).connect(state.context.destination);
+    state.sources.high.connect(state.gains.high).connect(state.context.destination);
+
+    const startTime = state.context.currentTime + 0.05;
+    state.sources.low.start(startTime);
+    state.sources.high.start(startTime);
+
+    state.isReady = true;
+    state.isPlaying = true;
+  };
+
+  const start = async () => {
+    if (state.isPlaying) {
+      if (state.context?.state === 'suspended') {
+        await state.context.resume();
+      }
+      return;
+    }
+    await initAudio();
+    if (state.context.state === 'suspended') {
+      await state.context.resume();
+    }
+    crossfadeTo(state.targetState);
+  };
+
+  const crossfadeTo = (energy) => {
+    state.targetState = energy;
+    if (!state.isReady) return;
+    const now = state.context.currentTime;
+    const fadeIn = state.gains[energy];
+    const fadeOut = state.gains[energy === 'low' ? 'high' : 'low'];
+
+    fadeIn.gain.cancelScheduledValues(now);
+    fadeOut.gain.cancelScheduledValues(now);
+    fadeIn.gain.setValueAtTime(fadeIn.gain.value, now);
+    fadeOut.gain.setValueAtTime(fadeOut.gain.value, now);
+    fadeIn.gain.linearRampToValueAtTime(1, now + crossfadeSeconds);
+    fadeOut.gain.linearRampToValueAtTime(0, now + crossfadeSeconds);
+  };
+
+  return { start, crossfadeTo };
+})();
+
 const palettes = {
   low: {
     background: '#0b1f2a',
@@ -105,7 +198,10 @@ const setEnergyState = (energy) => {
   stateValue.textContent = energy === 'low' ? 'Low energy' : 'High energy';
   game.shiftTimer = 0;
   game.orbs = layouts[energy].orbs.map((orb) => ({ ...orb, collected: false }));
+  audioManager.crossfadeTo(energy);
 };
+
+window.setEnergyState = setEnergyState;
 
 const resetGame = () => {
   game.energy = game.maxEnergy;
@@ -436,6 +532,9 @@ const loop = (now) => {
 
 window.addEventListener('keydown', (event) => {
   if (event.repeat) return;
+  audioManager.start().catch((error) => {
+    console.warn('Audio playback unavailable:', error);
+  });
   keys.add(event.code);
   presses.add(event.code);
 });
@@ -443,6 +542,16 @@ window.addEventListener('keydown', (event) => {
 window.addEventListener('keyup', (event) => {
   keys.delete(event.code);
 });
+
+window.addEventListener(
+  'pointerdown',
+  () => {
+    audioManager.start().catch((error) => {
+      console.warn('Audio playback unavailable:', error);
+    });
+  },
+  { once: true },
+);
 
 window.addEventListener('resize', resize);
 resize();
